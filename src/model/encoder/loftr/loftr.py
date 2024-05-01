@@ -10,6 +10,8 @@ from .utils.misc import detect_NaN
 
 from loguru import logger
 
+from torchvision.utils import save_image
+
 def reparameter(matcher):
     module = matcher.backbone.layer0
     if hasattr(module, 'switch_to_deploy'):
@@ -39,7 +41,11 @@ class LoFTR(nn.Module):
         self.fine_preprocess = FinePreprocess(config)
         self.fine_matching = FineMatching(config)
 
-    def forward(self, data,return_cnn_features=True,):
+    def forward(
+        self, 
+        data, 
+        return_cnn_features=True,
+        wo_fpn_depth=False):
         """ 
         Update:
             data (dict): {
@@ -49,11 +55,17 @@ class LoFTR(nn.Module):
                 'mask1'(optional) : (torch.Tensor): (N, H, W)
             }
         """
-        # 1. Local Feature CNN
+        cnn_features = None
+        b = data['image0'].size(0)
+        # 1. Local Feature CNN 
         data.update({
             'bs': data['image0'].size(0),
             'hw0_i': data['image0'].shape[2:], 'hw1_i': data['image1'].shape[2:]
         })
+
+        
+        # save_image(data['image0'][0], 'outputs/tmp/loftr0.png')
+        # save_image(data['image1'][0], 'outputs/tmp/loftr1.png')
 
         if data['hw0_i'] == data['hw1_i']:  # faster & better BN convergence
             ret_dict = self.backbone(torch.cat([data['image0'], data['image1']], dim=0))
@@ -63,6 +75,14 @@ class LoFTR(nn.Module):
                 'feats_x1': ret_dict['feats_x1'],
             })
             (feat_c0, feat_c1) = feats_c.split(data['bs'])
+            # cnn_features = data['feats_x2'] # bvchw
+            # cnn_features = rearrange(cnn_features, '(b v) c h w -> b v c h w', b=b, v=2)
+            cnn_features_x2 = rearrange(data['feats_x2'], '(b v) c h w -> b v c h w', b=b, v=2)
+            cnn_features_x1 = rearrange(data['feats_x1'], '(b v) c h w -> b v c h w', b=b, v=2)
+            cnn_features_c = rearrange(feats_c, '(b v) c h w -> b v c h w', b=b, v=2)
+            cnn_features = [cnn_features_c, cnn_features_x2, cnn_features_x1]
+                
+        
         else:  # handle different input shapes
             ret_dict0, ret_dict1 = self.backbone(data['image0']), self.backbone(data['image1'])
             feat_c0 = ret_dict0['feats_c']
@@ -73,6 +93,7 @@ class LoFTR(nn.Module):
                 'feats_x2_1': ret_dict1['feats_x2'],
                 'feats_x1_1': ret_dict1['feats_x1'],
             })
+            # cnn_features = torch.cat([data['feats_x2_0'].unsqueeze(1), data['feats_x2_1'].unsqueeze(1)], dim=1) # bvchw
 
         mul = self.config['resolution'][0] // self.config['resolution'][1]
         data.update({
@@ -80,7 +101,7 @@ class LoFTR(nn.Module):
             'hw0_f': [feat_c0.shape[2] * mul, feat_c0.shape[3] * mul] ,
             'hw1_f': [feat_c1.shape[2] * mul, feat_c1.shape[3] * mul]
         })
-        cnn_features = torch.cat([feat_c0.unsqueeze(1), feat_c1.unsqueeze(1)], dim=1) # bvchw
+        # cnn_features = torch.cat([feat_c0.unsqueeze(1), feat_c1.unsqueeze(1)], dim=1) # bvchw
 
         # 2. coarse-level loftr module
         mask_c0 = mask_c1 = None  # mask is useful in training
@@ -109,8 +130,9 @@ class LoFTR(nn.Module):
                         [feat_c0, feat_c1])
 
         # 4. fine-level refinement
-        feat_f0_unfold, feat_f1_unfold = self.fine_preprocess(feat_c0, feat_c1, data)
-        
+        feat_f0_unfold, feat_f1_unfold, fpn_feature = self.fine_preprocess(feat_c0, feat_c1, data)
+        fpn_feature =[rearrange(f, '(b v) c h w -> b v c h w', b=b, v=2) for f in fpn_feature]
+
         # detect NaN during mixed precision training
         if self.config['replace_nan'] and (torch.any(torch.isnan(feat_f0_unfold)) or torch.any(torch.isnan(feat_f1_unfold))):
             detect_NaN(feat_f0_unfold, feat_f1_unfold)

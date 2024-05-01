@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Optional, Type, TypeVar
@@ -48,6 +50,7 @@ class RootCfg:
     test: TestCfg
     train: TrainCfg
     seed: int
+    output_dir: str
 
 
 TYPE_HOOKS = {

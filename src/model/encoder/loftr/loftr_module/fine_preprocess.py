@@ -57,18 +57,21 @@ class FinePreprocess(nn.Module):
         x1 = self.layer1_outconv(x1)
         x1 = self.layer1_outconv2(x1+x2)
         x1 = F.interpolate(x1, scale_factor=2., mode='bilinear', align_corners=False)
-        return x1
+        return x1, x2, feat_c
     
     def forward(self, feat_c0, feat_c1, data):
         W = self.W
         stride = data['hw0_f'][0] // data['hw0_c'][0]
 
         data.update({'W': W})
+        
         if data['b_ids'].shape[0] == 0:
+            print ("data['b_ids'].shape[0] is zero!!!!!!!!!!!!!!!")
             feat0 = torch.empty(0, self.W**2, self.fine_d_model, device=feat_c0.device)
             feat1 = torch.empty(0, self.W**2, self.fine_d_model, device=feat_c0.device)
-            return feat0, feat1
+            return feat0, feat1, []
 
+        
         if data['hw0_i'] == data['hw1_i']:
             feat_c = rearrange(torch.cat([feat_c0, feat_c1], 0), 'b (h w) c -> b c h w', h=data['hw0_c'][0]) # 1/8 feat
             x2 = data['feats_x2'] # 1/4 feat
@@ -76,7 +79,7 @@ class FinePreprocess(nn.Module):
             del data['feats_x2'], data['feats_x1']
 
             # 1. fine feature extraction
-            x1 = self.inter_fpn(feat_c, x2, x1, stride)                    
+            x1, x2_out, feat_c_out = self.inter_fpn(feat_c, x2, x1, stride)                    
             feat_f0, feat_f1 = torch.chunk(x1, 2, dim=0)
 
             # 2. unfold(crop) all local windows
@@ -89,7 +92,7 @@ class FinePreprocess(nn.Module):
             feat_f0 = feat_f0[data['b_ids'], data['i_ids']]  # [n, ww, cf]
             feat_f1 = feat_f1[data['b_ids'], data['j_ids']]
 
-            return feat_f0, feat_f1
+            return feat_f0, feat_f1, [x1, x2_out, feat_c_out]
         else:  # handle different input shapes
             feat_c0, feat_c1 = rearrange(feat_c0, 'b (h w) c -> b c h w', h=data['hw0_c'][0]), rearrange(feat_c1, 'b (h w) c -> b c h w', h=data['hw1_c'][0]) # 1/8 feat
             x2_0, x2_1 = data['feats_x2_0'], data['feats_x2_1'] # 1/4 feat

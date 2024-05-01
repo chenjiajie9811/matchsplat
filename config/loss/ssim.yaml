@@ -1,0 +1,4 @@
+ssim:
+  weight: 1.0
+  window_size: 11
+  channel: 3

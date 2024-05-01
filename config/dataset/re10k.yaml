@@ -2,14 +2,16 @@ defaults:
   - view_sampler: bounded
 
 name: re10k
-roots: [datasets/re10k]
+# roots: [datasets/re10k]
+roots: [/usr/stud/chj/storage/user/chj/datasets/re10k_subset]
 make_baseline_1: true
 augment: true
 
 # H, W must be divided by 32, and h must be greater than 200=self.TRAIN_PAD_NUM_GT_MIN 
 # image_shape: [180, 320]
 # image_shape: [160, 320]
-image_shape: [224, 320]
+# image_shape: [224, 320]
+image_shape: [256, 256]
 background_color: [0.0, 0.0, 0.0]
 cameras_are_circular: false
 

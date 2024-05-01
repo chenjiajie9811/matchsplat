@@ -112,6 +112,10 @@ class ModelWrapper(LightningModule):
         self.data_shim = get_data_shim(self.encoder)
         self.losses = nn.ModuleList(losses)
 
+        # Freeze the eloftr
+        for p in self.encoder.matcher.parameters():
+            p.requires_grad = False
+
         # This is used for testing.
         self.benchmarker = Benchmarker()
         self.eval_cnt = 0
@@ -124,10 +128,11 @@ class ModelWrapper(LightningModule):
     def training_step(self, batch, batch_idx):
         batch: BatchedExample = self.data_shim(batch)
         _, _, _, h, w = batch["target"]["image"].shape
-
+        
         # Run the model.
+        # input the batch instead of batch["context"] here
         gaussians = self.encoder(
-            batch["context"], self.global_step, False, scene_names=batch["scene"]
+            batch, self.global_step, False, scene_names=batch["scene"]
         )
         output = self.decoder.forward(
             gaussians,
@@ -139,6 +144,19 @@ class ModelWrapper(LightningModule):
             depth_mode=self.train_cfg.depth_mode,
         )
         target_gt = batch["target"]["image"]
+
+        output_context = self.decoder.forward(
+            gaussians,
+            batch["context"]["extrinsics"],
+            batch["context"]["intrinsics"],
+            batch["context"]["near"],
+            batch["context"]["far"],
+            (h, w),
+            depth_mode=self.train_cfg.depth_mode,
+        )
+        batch["context"]["rendered_img"] = output_context.color
+        batch["context"]["rendered_depth"] = output_context.depth
+        
 
         # Compute metrics.
         psnr_probabilistic = compute_psnr(
@@ -185,7 +203,7 @@ class ModelWrapper(LightningModule):
         # Render Gaussians.
         with self.benchmarker.time("encoder"):
             gaussians = self.encoder(
-                batch["context"],
+                batch, #["context"],
                 self.global_step,
                 deterministic=False,
             )
@@ -228,20 +246,20 @@ class ModelWrapper(LightningModule):
 
             if f"psnr" not in self.test_step_outputs:
                 self.test_step_outputs[f"psnr"] = []
-            if f"ssim" not in self.test_step_outputs:
-                self.test_step_outputs[f"ssim"] = []
-            if f"lpips" not in self.test_step_outputs:
-                self.test_step_outputs[f"lpips"] = []
+            # if f"ssim" not in self.test_step_outputs:
+            #     self.test_step_outputs[f"ssim"] = []
+            # if f"lpips" not in self.test_step_outputs:
+            #     self.test_step_outputs[f"lpips"] = []
 
             self.test_step_outputs[f"psnr"].append(
                 compute_psnr(rgb_gt, rgb).mean().item()
             )
-            self.test_step_outputs[f"ssim"].append(
-                compute_ssim(rgb_gt, rgb).mean().item()
-            )
-            self.test_step_outputs[f"lpips"].append(
-                compute_lpips(rgb_gt, rgb).mean().item()
-            )
+            # self.test_step_outputs[f"ssim"].append(
+            #     compute_ssim(rgb_gt, rgb).mean().item()
+            # )
+            # self.test_step_outputs[f"lpips"].append(
+            #     compute_lpips(rgb_gt, rgb).mean().item()
+            # )
 
     def on_test_end(self) -> None:
         name = get_cfg()["wandb"]["name"]
@@ -292,7 +310,7 @@ class ModelWrapper(LightningModule):
         b, _, _, h, w = batch["target"]["image"].shape
         assert b == 1
         gaussians_softmax = self.encoder(
-            batch["context"],
+            batch,#["context"],
             self.global_step,
             deterministic=False,
         )
@@ -303,6 +321,7 @@ class ModelWrapper(LightningModule):
             batch["target"]["near"],
             batch["target"]["far"],
             (h, w),
+            "depth"
         )
         rgb_softmax = output_softmax.color[0]
 
@@ -317,6 +336,11 @@ class ModelWrapper(LightningModule):
             self.log(f"val/lpips_{tag}", lpips)
             ssim = compute_ssim(rgb_gt, rgb).mean()
             self.log(f"val/ssim_{tag}", ssim)
+
+            print (
+                f"psnr_{tag}: {psnr}, "
+                f"lpips_{tag}: {lpips}, "
+                f"ssim_{tag}: {ssim}, ")
 
         # Construct comparison image.
         comparison = hcat(
@@ -340,6 +364,25 @@ class ModelWrapper(LightningModule):
         self.logger.log_image(
             "projection",
             [prep_image(add_border(projections))],
+            step=self.global_step,
+        )
+
+        # Render colored depth map
+        # Color-map the result.
+        def depth_map(result): 
+
+            near = result[result > 0][:16_000_000].quantile(0.01).log()
+            far = result.view(-1)[:16_000_000].quantile(0.8).log()
+            result = result.log()
+
+            result = 1 - (result - near) / (far - near)
+            return apply_color_map_to_image(result, "turbo")
+
+        colored_depth = depth_map(output_softmax.depth[0])
+        vis_depth = add_label(hcat(*colored_depth), "Target depth")
+        self.logger.log_image(
+            "depth",
+            [prep_image(add_border(vis_depth))],
             step=self.global_step,
         )
 
@@ -470,7 +513,10 @@ class ModelWrapper(LightningModule):
         loop_reverse: bool = True,
     ) -> None:
         # Render probabilistic estimate of scene.
-        gaussians_prob = self.encoder(batch["context"], self.global_step, False)
+        gaussians_prob = self.encoder(
+            batch,#["context"], 
+            self.global_step, 
+            False)
         # gaussians_det = self.encoder(batch["context"], self.global_step, True)
 
         t = torch.linspace(0, 1, num_frames, dtype=torch.float32, device=self.device)

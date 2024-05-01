@@ -1,0 +1,5 @@
+corres:
+  weight_repro: 0.05
+  weight_depth: 0.05
+  use_corres_depth: false
+  use_corres_repro: true

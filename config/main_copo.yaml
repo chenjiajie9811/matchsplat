@@ -1,9 +1,9 @@
 defaults:
   - dataset: re10k
   - optional dataset/view_sampler_dataset_specific_config: ${dataset/view_sampler}_${dataset}
-  - model/encoder: eloftr
+  - model/encoder: copo
   - model/decoder: splatting_cuda
-  - loss: [mse, lpips, depth]
+  - loss: [mse, pose, ssim]
 
 wandb:
   project: mvsplat
@@ -24,7 +24,7 @@ data_loader:
   train:
     num_workers: 4
     persistent_workers: true
-    batch_size: 1
+    batch_size: 2
     seed: 123456
   test:
     num_workers: 4
@@ -32,7 +32,7 @@ data_loader:
     batch_size: 1
     seed: 2345
   val:
-    num_workers: 1
+    num_workers: 4
     persistent_workers: true
     batch_size: 1
     seed: 3456
@@ -43,7 +43,8 @@ optimizer:
   cosine_lr: true
 
 checkpointing:
-  load: null
+  load: outputs/tmp/checkpoints/epoch_824-step_16000.ckpt
+
   every_n_train_steps: 500  # 5000
   save_top_k: -1
   pretrained_model: null
@@ -54,8 +55,8 @@ train:
   print_log_every_n_steps: 10
 
 test:
-  output_path: outputs/test_fpn
-  compute_scores: false
+  output_path: outputs/test
+  compute_scores: true
   eval_time_skip_steps: 0
   save_image: false
   save_video: false
@@ -68,4 +69,4 @@ trainer:
   gradient_clip_val: 0.5
   num_sanity_val_steps: 1 # default 2 for validation steps before the first training step
 
-output_dir: outputs/fpn
+output_dir: outputs/tmp/

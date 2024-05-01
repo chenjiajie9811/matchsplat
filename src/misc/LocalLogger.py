@@ -6,7 +6,7 @@ from PIL import Image
 from pytorch_lightning.loggers.logger import Logger
 from pytorch_lightning.utilities import rank_zero_only
 
-LOG_PATH = Path("outputs/local")
+LOG_PATH = Path("outputs/local_fpn")
 
 
 class LocalLogger(Logger):

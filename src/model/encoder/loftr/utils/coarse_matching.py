@@ -6,6 +6,8 @@ from einops.einops import rearrange, repeat
 from loguru import logger
 import numpy as np
 
+from torchvision.utils import save_image
+
 INF = 1e9
 
 def mask_border(m, b: int, v):
@@ -122,6 +124,7 @@ class CoarseMatching(nn.Module):
             sim_matrix = F.softmax(sim_matrix, 1) * F.softmax(sim_matrix, 2)
 
         data.update({'conf_matrix': sim_matrix})
+        # save_image(sim_matrix[0], 'outputs/tmp/sim_mat.png')
 
         # predict coarse matches from conf_matrix
         data.update(**self.get_coarse_match(sim_matrix, data))
@@ -150,7 +153,10 @@ class CoarseMatching(nn.Module):
         }
         _device = conf_matrix.device
         # 1. confidence thresholding
+        # print ("conf_matrix max ", conf_matrix.max())
         mask = conf_matrix > self.thr
+        
+        # print ("mask sum ", mask.sum())
         mask = rearrange(mask, 'b (h0c w0c) (h1c w1c) -> b h0c w0c h1c w1c',
                          **axes_lengths)
 
@@ -167,6 +173,9 @@ class CoarseMatching(nn.Module):
             * (conf_matrix == conf_matrix.max(dim=2, keepdim=True)[0]) \
             * (conf_matrix == conf_matrix.max(dim=1, keepdim=True)[0])
 
+        # print (mask)
+        # print ("mask ", mask.shape)
+
         # 3. find all valid coarse matches
         # this only works when at most one `True` in each row
         mask_v, all_j_ids = mask.max(dim=2)
@@ -174,47 +183,62 @@ class CoarseMatching(nn.Module):
         j_ids = all_j_ids[b_ids, i_ids]
         mconf = conf_matrix[b_ids, i_ids, j_ids]
 
+        # print (mask_v)
+        # print ("mask_v ", mask_v.shape)
+
+        # print (b_ids)
+        # print (b_ids.shape)
+
+        # print (i_ids)
+        # print (i_ids.shape)
+
+        # print (j_ids)
+        # print (j_ids.shape)
+
+        # input()
+
         # 4. Random sampling of training samples for fine-level LoFTR
         # (optional) pad samples with gt coarse-level matches
         
         if self.training:
+            pass
             # NOTE:
             # The sampling is performed across all pairs in a batch without manually balancing
             # #samples for fine-level increases w.r.t. batch_size
-            if 'mask0' not in data:
-                num_candidates_max = mask.size(0) * max(
-                    mask.size(1), mask.size(2))
-            else:
-                num_candidates_max = compute_max_candidates(
-                    data['mask0'], data['mask1'])
-            num_matches_train = int(num_candidates_max *
-                                    self.train_coarse_percent)
-            num_matches_pred = len(b_ids)
+            # if 'mask0' not in data:
+            #     num_candidates_max = mask.size(0) * max(
+            #         mask.size(1), mask.size(2))
+            # else:
+            #     num_candidates_max = compute_max_candidates(
+            #         data['mask0'], data['mask1'])
+            # num_matches_train = int(num_candidates_max *
+            #                         self.train_coarse_percent)
+            # num_matches_pred = len(b_ids)
             
-            assert self.train_pad_num_gt_min < num_matches_train, "min-num-gt-pad should be less than num-train-matches"
+            # assert self.train_pad_num_gt_min < num_matches_train, "min-num-gt-pad should be less than num-train-matches"
 
-            # pred_indices is to select from prediction
-            if num_matches_pred <= num_matches_train - self.train_pad_num_gt_min:
-                pred_indices = torch.arange(num_matches_pred, device=_device)
-            else:
-                pred_indices = torch.randint(
-                    num_matches_pred,
-                    (num_matches_train - self.train_pad_num_gt_min, ),
-                    device=_device)
+            # # pred_indices is to select from prediction
+            # if num_matches_pred <= num_matches_train - self.train_pad_num_gt_min:
+            #     pred_indices = torch.arange(num_matches_pred, device=_device)
+            # else:
+            #     pred_indices = torch.randint(
+            #         num_matches_pred,
+            #         (num_matches_train - self.train_pad_num_gt_min, ),
+            #         device=_device)
 
-            # gt_pad_indices is to select from gt padding. e.g. max(3787-4800, 200)
-            gt_pad_indices = torch.randint(
-                    len(data['spv_b_ids']),
-                    (max(num_matches_train - num_matches_pred,
-                        self.train_pad_num_gt_min), ),
-                    device=_device)
-            mconf_gt = torch.zeros(len(data['spv_b_ids']), device=_device)  # set conf of gt paddings to all zero
+            # # gt_pad_indices is to select from gt padding. e.g. max(3787-4800, 200)
+            # gt_pad_indices = torch.randint(
+            #         len(data['spv_b_ids']),
+            #         (max(num_matches_train - num_matches_pred,
+            #             self.train_pad_num_gt_min), ),
+            #         device=_device)
+            # mconf_gt = torch.zeros(len(data['spv_b_ids']), device=_device)  # set conf of gt paddings to all zero
 
-            b_ids, i_ids, j_ids, mconf = map(
-                lambda x, y: torch.cat([x[pred_indices], y[gt_pad_indices]],
-                                       dim=0),
-                *zip([b_ids, data['spv_b_ids']], [i_ids, data['spv_i_ids']],
-                     [j_ids, data['spv_j_ids']], [mconf, mconf_gt]))
+            # b_ids, i_ids, j_ids, mconf = map(
+            #     lambda x, y: torch.cat([x[pred_indices], y[gt_pad_indices]],
+            #                            dim=0),
+            #     *zip([b_ids, data['spv_b_ids']], [i_ids, data['spv_i_ids']],
+            #          [j_ids, data['spv_j_ids']], [mconf, mconf_gt]))
 
         # These matches select patches that feed into fine-level network
         coarse_matches = {'b_ids': b_ids, 'i_ids': i_ids, 'j_ids': j_ids}

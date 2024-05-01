@@ -30,8 +30,6 @@ with install_import_hook(
     from src.model.decoder import get_decoder
     from src.model.encoder import get_encoder
     from src.model.model_wrapper import ModelWrapper
-    from src.model.encoder.loftr.utils.full_config import full_default_cfg
-    from src.model.encoder.loftr.utils.opt_config import opt_default_cfg
 
 
 def cyan(text: str) -> str:
@@ -41,7 +39,7 @@ def cyan(text: str) -> str:
 @hydra.main(
     version_base=None,
     config_path="../config",
-    config_name="main_1",
+    config_name="main_copo",
 )
 def train(cfg_dict: DictConfig):
 
@@ -114,7 +112,7 @@ def train(cfg_dict: DictConfig):
         devices="auto",
         strategy="ddp" if torch.cuda.device_count() > 1 else "auto",
         callbacks=callbacks,
-        val_check_interval=cfg.trainer.val_check_interval,
+        # val_check_interval=cfg.trainer.val_check_interval,
         check_val_every_n_epoch=1,
         enable_progress_bar=cfg.mode == "test",
         gradient_clip_val=cfg.trainer.gradient_clip_val,
@@ -123,13 +121,15 @@ def train(cfg_dict: DictConfig):
     )
     torch.manual_seed(cfg_dict.seed + trainer.global_rank)
 
-    encoder, encoder_visualizer = get_encoder(cfg.model.encoder,  backbone_cfg =_default_cfg)
+    encoder, encoder_visualizer = get_encoder(cfg.model.encoder)
     # if cfg.mode == "train":
     #     depth_ckpt_path = "checkpoints/depth_predictor.ckpt"
     #     # depth_ckpt_path = "outputs/tmp/checkpoints/epoch_131-step_5000.ckpt"
     #     encoder.load_state_dict(torch.load(depth_ckpt_path), strict=False) # only load weight of depth_predictor
     # else:
-    
+    # encoder_ckpt_path = "outputs/tmp/checkpoints/epoch_174-step_3500.ckpt"
+    # encoder.load_state_dict(torch.load(encoder_ckpt_path), strict=False)
+
     model_wrapper = ModelWrapper(
         cfg.optimizer,
         cfg.test,
@@ -147,15 +147,9 @@ def train(cfg_dict: DictConfig):
         global_rank=trainer.global_rank,
     )
 
-    encoder_ckpt_path = "outputs/fpn/checkpoints/epoch_358-step_14000.ckpt"
-    model_wrapper.load_state_dict(torch.load(encoder_ckpt_path)['state_dict'], strict=False)
-    
     if cfg.mode == "train":
         trainer.fit(model_wrapper, datamodule=data_module, ckpt_path=checkpoint_path)
     else:
-        # encoder_ckpt_path = "outputs/elfotr/checkpoints/epoch_999-step_10000-v1.ckpt"
-        # model_wrapper.load_state_dict(torch.load(encoder_ckpt_path)['state_dict'], strict=False)
-        
         trainer.test(
             model_wrapper,
             datamodule=data_module,
@@ -167,20 +161,6 @@ if __name__ == "__main__":
     warnings.filterwarnings("ignore")
     torch.set_float32_matmul_precision('high')
 
-    from copy import deepcopy
 
-    model_type = 'full' 
-    precision = 'fp32' 
-    if model_type == 'full':
-        _default_cfg = deepcopy(full_default_cfg)
-    elif model_type == 'opt':
-        _default_cfg = deepcopy(opt_default_cfg)
-        
-    if precision == 'mp':
-        _default_cfg['mp'] = True
-    elif precision == 'fp16':
-        _default_cfg['half'] = True
-    
-    print(_default_cfg)
     
     train()

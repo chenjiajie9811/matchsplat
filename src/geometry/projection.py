@@ -1,9 +1,13 @@
+from __future__ import annotations
+
 from math import prod
 
 import torch
 from einops import einsum, rearrange, reduce, repeat
 from jaxtyping import Bool, Float, Int64
 from torch import Tensor
+
+
 
 
 def homogenize_points(
