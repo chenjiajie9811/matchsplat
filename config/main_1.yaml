@@ -3,7 +3,7 @@ defaults:
   - optional dataset/view_sampler_dataset_specific_config: ${dataset/view_sampler}_${dataset}
   - model/encoder: eloftr
   - model/decoder: splatting_cuda
-  - loss: [mse, lpips, depth]
+  - loss: [mse, lpips, depth, zoe]
 
 wandb:
   project: mvsplat
@@ -17,15 +17,17 @@ mode: train
 
 
 dataset:
-  overfit_to_scene: null
+  overfit_to_scene: null #0972074fece891f2
+  # view_sampler:
+  #   index_path: outputs/evaluation_index_re10k/evaluation_index.json
 
 data_loader:
   # Avoid having to spin up new processes to print out visualizations.
   train:
     num_workers: 4
     persistent_workers: true
-    batch_size: 1
-    seed: 123456
+    batch_size: 2
+    seed: 12345
   test:
     num_workers: 4
     persistent_workers: false
@@ -43,7 +45,7 @@ optimizer:
   cosine_lr: true
 
 checkpointing:
-  load: null
+  load: null #outputs/fpn/checkpoints/epoch_724-step_14500.ckpt #null
   every_n_train_steps: 500  # 5000
   save_top_k: -1
   pretrained_model: null
@@ -55,16 +57,16 @@ train:
 
 test:
   output_path: outputs/test_fpn
-  compute_scores: false
+  compute_scores: true
   eval_time_skip_steps: 0
-  save_image: false
+  save_image: true
   save_video: false
 
 seed: 111123
 
 trainer:
   max_steps: 20000 #-1
-  val_check_interval: 0.8  #0.5
+  val_check_interval: 0.5 #0.5
   gradient_clip_val: 0.5
   num_sanity_val_steps: 1 # default 2 for validation steps before the first training step
 

@@ -5,6 +5,7 @@ from .loss_mse import LossMse, LossMseCfgWrapper
 from .loss_pose import LossPose, LossPoseCfgWrapper
 from .loss_ssim import LossSSIM, LossSSIMCfgWrapper
 from .loss_corres import LossCorres, LossCorresCfgWrapper
+from .loss_zoe import LossZoe, LossZoeCfgWrapper
 
 LOSSES = {
     LossDepthCfgWrapper: LossDepth,
@@ -13,10 +14,13 @@ LOSSES = {
     LossPoseCfgWrapper: LossPose,
     LossSSIMCfgWrapper: LossSSIM,
     LossCorresCfgWrapper: LossCorres,
+    LossZoeCfgWrapper: LossZoe,
 }
 
 LossCfgWrapper = LossDepthCfgWrapper | LossLpipsCfgWrapper | LossMseCfgWrapper \
-                | LossPoseCfgWrapper | LossSSIMCfgWrapper | LossCorresCfgWrapper
+                | LossPoseCfgWrapper | LossSSIMCfgWrapper | LossCorresCfgWrapper \
+                | LossZoeCfgWrapper
+                
 
 
 def get_losses(cfgs: list[LossCfgWrapper]) -> list[Loss]:

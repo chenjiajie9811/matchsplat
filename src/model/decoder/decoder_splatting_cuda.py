@@ -86,6 +86,7 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
             repeat(gaussians.means, "b g xyz -> (b v) g xyz", v=v),
             repeat(gaussians.covariances, "b g i j -> (b v) g i j", v=v),
             repeat(gaussians.opacities, "b g -> (b v) g", v=v),
+            scale_invariant=False,
             mode=mode,
         )
         return rearrange(result, "(b v) h w -> b v h w", b=b, v=v)

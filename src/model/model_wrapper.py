@@ -41,6 +41,16 @@ from .decoder.decoder import Decoder, DepthRenderingMode
 from .encoder import Encoder
 from .encoder.visualization.encoder_visualizer import EncoderVisualizer
 
+from plyfile import PlyData, PlyElement
+def save_points_ply(points, path):
+    vertex = np.array([(points[i][0], points[i][1], points[i][2]) 
+                        for i in range(points.shape[0])], 
+                        dtype=[('x', 'f4'), ('y', 'f4'), ('z', 'f4')])
+    
+    vertex_element = PlyElement.describe(vertex, 'vertex')
+    plydata = PlyData([vertex_element])
+    plydata.write(path)
+
 
 @dataclass
 class OptimizerCfg:
@@ -134,6 +144,14 @@ class ModelWrapper(LightningModule):
         gaussians = self.encoder(
             batch, self.global_step, False, scene_names=batch["scene"]
         )
+
+        # for debug
+        # output the gaussians mean
+        # for i in range(gaussians.means.shape[0]):
+        #     gs_i = gaussians.means[i].clone().detach().cpu().numpy()
+        #     save_points_ply(gs_i, f"outputs/tmp/gaussians_{i}.ply")
+            # input()
+
         output = self.decoder.forward(
             gaussians,
             batch["target"]["extrinsics"],
@@ -156,7 +174,6 @@ class ModelWrapper(LightningModule):
         )
         batch["context"]["rendered_img"] = output_context.color
         batch["context"]["rendered_depth"] = output_context.depth
-        
 
         # Compute metrics.
         psnr_probabilistic = compute_psnr(
@@ -372,7 +389,7 @@ class ModelWrapper(LightningModule):
         def depth_map(result): 
 
             near = result[result > 0][:16_000_000].quantile(0.01).log()
-            far = result.view(-1)[:16_000_000].quantile(0.8).log()
+            far = result.view(-1)[:16_000_000].quantile(0.99).log()
             result = result.log()
 
             result = 1 - (result - near) / (far - near)

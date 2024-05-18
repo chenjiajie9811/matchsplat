@@ -1,8 +1,9 @@
+from tkinter import FALSE
 import torch
 from torch import Tensor, nn
 import torch.nn.functional as F
 import torchvision.transforms as tf
-from einops.einops import rearrange
+from einops.einops import rearrange, repeat
 from jaxtyping import Float
 from collections import OrderedDict
 
@@ -32,6 +33,29 @@ from .costvolume.get_depth_fpn import DepthPredictorMultiView
 
 # from .visualization.encoder_visualizer_costvolume_cfg import EncoderVisualizerCostVolumeCfg
 from .visualization.encoder_visualizer_eloftr_cfg import EncoderVisualizerELoftrCfg
+
+from src.visualization.vis_depth import viz_depth_tensor
+from PIL import Image
+import numpy as np
+
+
+def get_zoe_depth(zoe, imgs, vis= False):
+    # repo = "isl-org/ZoeDepth"
+    # zoe = torch.hub.load(repo, "ZoeD_N", pretrained=True).cuda()
+    b, v, c, h, w = imgs.size()
+    depths = []
+    for v_idx in range(v):
+        img = imgs[:, v_idx, :, :, :].cuda()
+        depth = zoe.infer(img)  # b 1 h w 
+
+        if vis:
+            vis_depth = viz_depth_tensor(depth[0][0].detach().cpu(), return_numpy=True)
+            Image.fromarray(vis_depth).save(f"outputs/out/zoe_depth_{v_idx}.png")
+        depths.append(depth.unsqueeze(1))
+    depths = torch.cat(depths, dim=1) # b v c h w
+    depths = repeat(depths, "b v dpt h w -> b v (h w) srf dpt", b=b, v=v, srf=1,)
+    return depths
+
 
 @dataclass
 class OpacityMappingCfg:
@@ -80,6 +104,11 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
         self.config = backbone_cfg
         self.return_cnn_features = True
 
+        print("==> Load ZoeDepth model ")
+        repo = "isl-org/ZoeDepth"
+        self.zoe = torch.hub.load(repo, "ZoeD_N", pretrained=True).cuda()
+
+
         self.matcher = LoFTR(backbone_cfg)
 
         ckpt_path = cfg.eloftr_weights_path
@@ -92,15 +121,6 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
             self.matcher = reparameter(self.matcher) # no reparameterization will lead to low performance
             # if precision == 'fp16':
             #     encoder = self.matcher.half()
-
-
-        # self.upconv_1x1 = nn.Conv2d(64,  cfg.d_feature, kernel_size=1)
-        # self.deconv_1x1 = nn.Conv2d(256, cfg.d_feature, kernel_size=1)
-
-        # self.deconv_1x1_trans_1 = nn.Conv2d(256, cfg.d_feature, kernel_size=1)
-        # self.deconv_1x1_trans_2 = nn.Conv2d(cfg.d_feature, cfg.d_feature, kernel_size=1)
-        # self.deconv_1x1_cnn_1 = nn.Conv2d(256, cfg.d_feature, kernel_size=1)
-        # self.deconv_1x1_cnn_2 = nn.Conv2d(cfg.d_feature, cfg.d_feature, kernel_size=1)
 
         self.conv_1x1_1 = nn.Conv2d(256, 256, kernel_size=1)
         self.conv_1x1_2 = nn.Conv2d(256, 128, kernel_size=1)
@@ -229,11 +249,6 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
         device = context["image"].device
         b, v, _, h, w = context["image"].shape      # 224, 320
         data = self.data_process(context["image"])  # input size must be divides by 32
-
-        # print ("input image shape", data['image0'].shape)
-
-        # TODO: maybe use the features after the fusion stage 
-        # for the later depth and gaussian parameter estimation
         
         """
             trans_feature: [b, v, 256, h/8, w/8]
@@ -244,10 +259,12 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
         trans_features_list = self.get_fpn_trans_features(trans_features)
         
         
-        # mkpts: shape [N, 2] with mkpts0 in all batch concatenated together, if not, the number of matched keypoints
-        # in different batches will be different and difficult to store them. 
-        # We can recover the matched keypoints for the desired batch by 
-        # mkpts0_b0 = mkpts0[mbids == 0]
+        """
+            mkpts: shape [N, 2] with mkpts0 in all batch concatenated together, if not, the number of matched keypoints
+            in different batches will be different and difficult to store them. 
+            We can recover the matched keypoints for the desired batch by 
+            mkpts0_b0 = mkpts0[mbids == 0]
+        """
         conf_mask = data['mconf'] >= 0.5
         # batch["mkpts0"], batch["mkpts1"], batch["mconf"], batch['mbids'] = \
         #     data['mkpts0_f'][conf_mask], data['mkpts1_f'][conf_mask], data['mconf'][conf_mask], data['m_bids'][conf_mask]
@@ -282,6 +299,26 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
         batch["context"]["est_depth"] = rearrange(
                 depths, "b v (h w) srf s -> b v h w srf s", h=h, w=w
             )
+
+        zoe_depths = get_zoe_depth(self.zoe, context["image"], vis=False).to(densities.device) # b v 1 h w        
+        batch["context"]['zoe_depth'] =  rearrange(zoe_depths, "b v (h w) srf s -> b v h w srf s", h=h, w=w)
+
+        # save depth result to compare
+        vis_depth = False
+        if vis_depth:
+            near, far = 0.0, 100.0
+            depth_vis = batch["context"]["est_depth"].squeeze(-1).squeeze(-1).cpu().detach()
+            zoe_depth_vis = batch["context"]['zoe_depth'].squeeze(-1).squeeze(-1).cpu().detach()
+            for v_idx in range(depth_vis.shape[1]):
+                depth_vis = np.clip(depth_vis, near, far)
+                vis_depth = viz_depth_tensor(1.0 / depth_vis[0, v_idx], return_numpy=True)  # inverse depth
+                Image.fromarray(vis_depth).save(f"outputs/tmp/pred_{v_idx}.png")
+                vis_depth = viz_depth_tensor(1.0 / zoe_depth_vis[0, v_idx], return_numpy=True)  # inverse depth
+                Image.fromarray(vis_depth).save(f"outputs/tmp/zoe_{v_idx}.png")
+                print(depth_vis[0, v_idx])
+                print(zoe_depth_vis[0, v_idx]) 
+            input()
+
 
         # Convert the features and depths into Gaussians.
         xy_ray, _ = sample_image_grid((h, w), device)
