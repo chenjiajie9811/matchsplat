@@ -41,6 +41,10 @@ from .decoder.decoder import Decoder, DepthRenderingMode
 from .encoder import Encoder
 from .encoder.visualization.encoder_visualizer import EncoderVisualizer
 
+from .encoder.pose.pose_estimation import pose_estimation_multi_view
+
+from tensorboardX import SummaryWriter
+
 from plyfile import PlyData, PlyElement
 def save_points_ply(points, path):
     vertex = np.array([(points[i][0], points[i][1], points[i][2]) 
@@ -134,6 +138,8 @@ class ModelWrapper(LightningModule):
             self.test_step_outputs = {}
             self.time_skip_steps_dict = {"encoder": 0, "decoder": 0}
 
+        self.writer = SummaryWriter()
+
 
     def training_step(self, batch, batch_idx):
         batch: BatchedExample = self.data_shim(batch)
@@ -152,9 +158,13 @@ class ModelWrapper(LightningModule):
         #     save_points_ply(gs_i, f"outputs/tmp/gaussians_{i}.ply")
             # input()
 
+        est_pose = True
+        if est_pose:
+            target_extrinsics_est = pose_estimation_multi_view(batch, self.encoder.matcher)
+
         output = self.decoder.forward(
             gaussians,
-            batch["target"]["extrinsics"],
+            batch["target"]["extrinsics"] if not est_pose else target_extrinsics_est,
             batch["target"]["intrinsics"],
             batch["target"]["near"],
             batch["target"]["far"],
@@ -181,14 +191,19 @@ class ModelWrapper(LightningModule):
             rearrange(output.color, "b v c h w -> (b v) c h w"),
         )
         self.log("train/psnr_probabilistic", psnr_probabilistic.mean())
+        self.writer.add_scalar("train/psnr_probabilistic", psnr_probabilistic.mean().item(), self.global_step)
+
 
         # Compute and log loss.
         total_loss = 0
         for loss_fn in self.losses:
             loss = loss_fn.forward(output, batch, gaussians, self.global_step)
             self.log(f"loss/{loss_fn.name}", loss)
+            self.writer.add_scalar(f"loss/{loss_fn.name}", loss.item(), self.global_step)
+
             total_loss = total_loss + loss
         self.log("loss/total", total_loss)
+        self.writer.add_scalar("loss/total", total_loss.item(), self.global_step)
 
         if (
             self.global_rank == 0
@@ -353,6 +368,10 @@ class ModelWrapper(LightningModule):
             self.log(f"val/lpips_{tag}", lpips)
             ssim = compute_ssim(rgb_gt, rgb).mean()
             self.log(f"val/ssim_{tag}", ssim)
+
+            self.writer.add_scalar(f"val/psnr_{tag}", psnr.item(), self.global_step)
+            self.writer.add_scalar(f"val/lpips_{tag}", lpips.item(), self.global_step)
+            self.writer.add_scalar(f"val/ssim_{tag}", ssim.item(), self.global_step)
 
             print (
                 f"psnr_{tag}: {psnr}, "

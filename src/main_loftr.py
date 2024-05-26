@@ -115,7 +115,7 @@ def train(cfg_dict: DictConfig):
         strategy="ddp" if torch.cuda.device_count() > 1 else "auto",
         callbacks=callbacks,
         val_check_interval=cfg.trainer.val_check_interval,
-        check_val_every_n_epoch=1,
+        # check_val_every_n_epoch=1,
         enable_progress_bar=cfg.mode == "test",
         gradient_clip_val=cfg.trainer.gradient_clip_val,
         max_steps=cfg.trainer.max_steps,
@@ -146,8 +146,8 @@ def train(cfg_dict: DictConfig):
         step_tracker,
         global_rank=trainer.global_rank,
     )
-
-    encoder_ckpt_path = "outputs/fpn/checkpoints/epoch_249-step_5000.ckpt"
+# /usr/stud/chj/storage/user/chj/matchsplat/outputs/fpn_large/checkpoints/epoch_0-step_15000.ckpt
+    encoder_ckpt_path = "outputs/fpn_large/checkpoints/epoch_8-step_140000.ckpt"
     model_wrapper.load_state_dict(torch.load(encoder_ckpt_path)['state_dict'], strict=False)
     
     if cfg.mode == "train":

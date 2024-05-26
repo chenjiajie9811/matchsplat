@@ -34,27 +34,29 @@ from .costvolume.get_depth_fpn import DepthPredictorMultiView
 # from .visualization.encoder_visualizer_costvolume_cfg import EncoderVisualizerCostVolumeCfg
 from .visualization.encoder_visualizer_eloftr_cfg import EncoderVisualizerELoftrCfg
 
+from .pose.pose_estimation import run_weighted_8_point
+
 from src.visualization.vis_depth import viz_depth_tensor
 from PIL import Image
 import numpy as np
 
 
-def get_zoe_depth(zoe, imgs, vis= False):
-    # repo = "isl-org/ZoeDepth"
-    # zoe = torch.hub.load(repo, "ZoeD_N", pretrained=True).cuda()
-    b, v, c, h, w = imgs.size()
-    depths = []
-    for v_idx in range(v):
-        img = imgs[:, v_idx, :, :, :].cuda()
-        depth = zoe.infer(img)  # b 1 h w 
+# def get_zoe_depth(zoe, imgs, vis= False):
+#     # repo = "isl-org/ZoeDepth"
+#     # zoe = torch.hub.load(repo, "ZoeD_N", pretrained=True).cuda()
+#     b, v, c, h, w = imgs.size()
+#     depths = []
+#     for v_idx in range(v):
+#         img = imgs[:, v_idx, :, :, :].cuda()
+#         depth = zoe.infer(img)  # b 1 h w 
 
-        if vis:
-            vis_depth = viz_depth_tensor(depth[0][0].detach().cpu(), return_numpy=True)
-            Image.fromarray(vis_depth).save(f"outputs/out/zoe_depth_{v_idx}.png")
-        depths.append(depth.unsqueeze(1))
-    depths = torch.cat(depths, dim=1) # b v c h w
-    depths = repeat(depths, "b v dpt h w -> b v (h w) srf dpt", b=b, v=v, srf=1,)
-    return depths
+#         if vis:
+#             vis_depth = viz_depth_tensor(depth[0][0].detach().cpu(), return_numpy=True)
+#             Image.fromarray(vis_depth).save(f"outputs/out/zoe_depth_{v_idx}.png")
+#         depths.append(depth.unsqueeze(1))
+#     depths = torch.cat(depths, dim=1) # b v c h w
+#     depths = repeat(depths, "b v dpt h w -> b v (h w) srf dpt", b=b, v=v, srf=1,)
+#     return depths
 
 
 @dataclass
@@ -104,9 +106,9 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
         self.config = backbone_cfg
         self.return_cnn_features = True
 
-        print("==> Load ZoeDepth model ")
-        repo = "isl-org/ZoeDepth"
-        self.zoe = torch.hub.load(repo, "ZoeD_N", pretrained=True).cuda()
+        # print("==> Load ZoeDepth model ")
+        # repo = "isl-org/ZoeDepth"
+        # self.zoe = torch.hub.load(repo, "ZoeD_N", pretrained=True).cuda()
 
 
         self.matcher = LoFTR(backbone_cfg)
@@ -133,7 +135,7 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
         # gaussians convertor
         self.gaussian_adapter = GaussianAdapter(cfg.gaussian_adapter)
 
-        # TODO BA based depth predictor
+        # Depth predictor
         self.depth_predictor = DepthPredictorMultiView(
             feature_channels=[256, 128, 64], #df
             upscale_factor=[8, 4, 2], #ds
@@ -266,11 +268,19 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
             mkpts0_b0 = mkpts0[mbids == 0]
         """
         conf_mask = data['mconf'] >= 0.5
-        # batch["mkpts0"], batch["mkpts1"], batch["mconf"], batch['mbids'] = \
-        #     data['mkpts0_f'][conf_mask], data['mkpts1_f'][conf_mask], data['mconf'][conf_mask], data['m_bids'][conf_mask]
         batch["mkpts0"], batch["mkpts1"], batch["mconf"], batch['mbids'] = \
-            data["mkpts0_f"], data["mkpts1_f"], data["mconf"], data['m_bids']
+            data['mkpts0_f'][conf_mask], data['mkpts1_f'][conf_mask], data['mconf'][conf_mask], data['m_bids'][conf_mask]
+        # batch["mkpts0"], batch["mkpts1"], batch["mconf"], batch['mbids'] = \
+        #     data["mkpts0_f"], data["mkpts1_f"], data["mconf"], data['m_bids']
 
+        est_pose = True
+        if est_pose:
+            # @TODO: Weights decoder for weighted 8-point algorithm
+            
+            # Pose estimation from the sparse matched keypoints
+            extrinsics_est = run_weighted_8_point(batch)
+        
+        
         # Sample depths from the resulting features.
         # in_feats = trans_features #[2]
         in_feats = trans_features_list
@@ -283,7 +293,7 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
         depths, densities, raw_gaussians = self.depth_predictor(
             in_feats,
             context["intrinsics"],
-            context["extrinsics"],
+            context["extrinsics"] if not est_pose else extrinsics_est,
             context["near"],
             context["far"],
             gaussians_per_pixel=gpp,
@@ -300,24 +310,24 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
                 depths, "b v (h w) srf s -> b v h w srf s", h=h, w=w
             )
 
-        zoe_depths = get_zoe_depth(self.zoe, context["image"], vis=False).to(densities.device) # b v 1 h w        
-        batch["context"]['zoe_depth'] =  rearrange(zoe_depths, "b v (h w) srf s -> b v h w srf s", h=h, w=w)
+        # zoe_depths = get_zoe_depth(self.zoe, context["image"], vis=False).to(densities.device) # b v 1 h w        
+        # batch["context"]['zoe_depth'] =  rearrange(zoe_depths, "b v (h w) srf s -> b v h w srf s", h=h, w=w)
 
         # save depth result to compare
-        vis_depth = False
-        if vis_depth:
-            near, far = 0.0, 100.0
-            depth_vis = batch["context"]["est_depth"].squeeze(-1).squeeze(-1).cpu().detach()
-            zoe_depth_vis = batch["context"]['zoe_depth'].squeeze(-1).squeeze(-1).cpu().detach()
-            for v_idx in range(depth_vis.shape[1]):
-                depth_vis = np.clip(depth_vis, near, far)
-                vis_depth = viz_depth_tensor(1.0 / depth_vis[0, v_idx], return_numpy=True)  # inverse depth
-                Image.fromarray(vis_depth).save(f"outputs/tmp/pred_{v_idx}.png")
-                vis_depth = viz_depth_tensor(1.0 / zoe_depth_vis[0, v_idx], return_numpy=True)  # inverse depth
-                Image.fromarray(vis_depth).save(f"outputs/tmp/zoe_{v_idx}.png")
-                print(depth_vis[0, v_idx])
-                print(zoe_depth_vis[0, v_idx]) 
-            input()
+        # vis_depth = False
+        # if vis_depth:
+        #     near, far = 0.0, 100.0
+        #     depth_vis = batch["context"]["est_depth"].squeeze(-1).squeeze(-1).cpu().detach()
+        #     zoe_depth_vis = batch["context"]['zoe_depth'].squeeze(-1).squeeze(-1).cpu().detach()
+        #     for v_idx in range(depth_vis.shape[1]):
+        #         depth_vis = np.clip(depth_vis, near, far)
+        #         vis_depth = viz_depth_tensor(1.0 / depth_vis[0, v_idx], return_numpy=True)  # inverse depth
+        #         Image.fromarray(vis_depth).save(f"outputs/tmp/pred_{v_idx}.png")
+        #         vis_depth = viz_depth_tensor(1.0 / zoe_depth_vis[0, v_idx], return_numpy=True)  # inverse depth
+        #         Image.fromarray(vis_depth).save(f"outputs/tmp/zoe_{v_idx}.png")
+        #         print(depth_vis[0, v_idx])
+        #         print(zoe_depth_vis[0, v_idx]) 
+        #     input()
 
 
         # Convert the features and depths into Gaussians.
