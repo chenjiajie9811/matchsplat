@@ -401,7 +401,7 @@ class LossCorres(Loss[LossCorresCfg, LossCorresCfgWrapper]):
 
                 # Extract the estimated depth for the mkpts
                 kpts_est_depth_0 = depth0[mkpts0[:, 1].long().squeeze(), mkpts0[:, 0].long().squeeze()]
-                kpts_est_depth_1 = depth0[mkpts1[:, 1].long().squeeze(), mkpts1[:, 0].long().squeeze()]
+                kpts_est_depth_1 = depth1[mkpts1[:, 1].long().squeeze(), mkpts1[:, 0].long().squeeze()]
 
                 # Compute loss by comparing the ratio with 1
                 loss_d_0 = torch.sum(torch.abs((kpts_est_depth_0 / (kpts_gt_depth_0 + 1e-6)) - 1.))
