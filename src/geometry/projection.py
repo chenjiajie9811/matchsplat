@@ -311,10 +311,29 @@ def triangulate_point_from_multiple_views_linear_torch(proj_matricies, points, c
     point_3d = from_homogeneous(point_3d_homo.unsqueeze(0))[0]
     return point_3d
 
+def iproj_full_img_(depth: Tensor, intr: Tensor, extr: Tensor):
+    ht, wd = depth.shape[-2:]
+    depth = depth.reshape(1, -1) 
+    xy_ray, _ = sample_image_grid(((ht, wd)), depth.device)
+    xy_ray = xy_ray.reshape(1, -1, 2)
+    origins, directions = get_world_rays(xy_ray, extr, intr)
+    return origins + directions * depth[..., None]
+
 def save_points_ply(points, path):
     vertex = np.array([(points[i][0], points[i][1], points[i][2]) 
                         for i in range(points.shape[0])], 
                         dtype=[('x', 'f4'), ('y', 'f4'), ('z', 'f4')])
+    
+    vertex_element = PlyElement.describe(vertex, 'vertex')
+    plydata = PlyData([vertex_element])
+    plydata.write(path)
+
+def save_color_points_ply(points, colors, path):
+    # colors in 0 - 255
+    vertex = np.array([(points[i][0], points[i][1], points[i][2], colors[i][0], colors[i][1], colors[i][2]) 
+                        for i in range(points.shape[0])], 
+                        dtype=[('x', 'f4'), ('y', 'f4'), ('z', 'f4'),
+                        ('red', 'u1'), ('green', 'u1'), ('blue', 'u1')])
     
     vertex_element = PlyElement.describe(vertex, 'vertex')
     plydata = PlyData([vertex_element])
