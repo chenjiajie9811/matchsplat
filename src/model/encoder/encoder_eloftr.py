@@ -273,7 +273,8 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
         # batch["mkpts0"], batch["mkpts1"], batch["mconf"], batch['mbids'] = \
         #     data["mkpts0_f"], data["mkpts1_f"], data["mconf"], data['m_bids']
 
-        est_pose = True
+        # est_pose = True
+        est_pose = False
         if est_pose:
             # @TODO: Weights decoder for weighted 8-point algorithm
             
@@ -300,6 +301,7 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
             deterministic=deterministic,
             extra_info=extra_info,
             cnn_features=cnn_features_list,
+            batch=batch
         )
         """
         # depths (b, v, 65536, 1, 1)  [srf, dpt]

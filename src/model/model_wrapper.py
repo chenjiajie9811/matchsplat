@@ -153,12 +153,13 @@ class ModelWrapper(LightningModule):
 
         # for debug
         # output the gaussians mean
-        # for i in range(gaussians.means.shape[0]):
-        #     gs_i = gaussians.means[i].clone().detach().cpu().numpy()
-        #     save_points_ply(gs_i, f"outputs/tmp/gaussians_{i}.ply")
-            # input()
+        for i in range(gaussians.means.shape[0]):
+            gs_i = gaussians.means[i].clone().detach().cpu().numpy()
+            save_points_ply(gs_i, f"outputs/tmp/gaussians_{i}.ply")
+            input()
 
-        est_pose = True
+        # est_pose = True
+        est_pose = False
         if est_pose:
             target_extrinsics_est = pose_estimation_multi_view(batch, self.encoder.matcher)
 
