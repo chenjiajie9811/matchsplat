@@ -58,6 +58,45 @@ import numpy as np
 #     depths = repeat(depths, "b v dpt h w -> b v (h w) srf dpt", b=b, v=v, srf=1,)
 #     return depths
 
+def MLP(channels: list, do_bn=True, do_leaky=False, last_layer=True):
+    """ Multi-layer perceptron """
+    n = len(channels)
+    layers = []
+    for i in range(1, n):
+        layers.append(
+            nn.Conv1d(channels[i - 1], channels[i], kernel_size=1, bias=True))
+        if i < (n-1 if last_layer else n):
+            if do_bn:
+                layers.append(nn.BatchNorm1d(channels[i]))
+            if do_leaky:
+                layers.append(nn.LeakyReLU())
+            else:
+                layers.append(nn.ReLU())
+    return nn.Sequential(*layers)
+
+class ConfidenceMLP(nn.Module):
+    def __init__(self, feature_dim, in_dim, out_dim=1):
+        super().__init__()
+        self.feature_dim = feature_dim
+        self.layers_f = MLP([feature_dim * 2, feature_dim * 2, feature_dim], last_layer=False)
+        self.layers_c = MLP([in_dim, feature_dim, feature_dim], last_layer=False)
+        self.layers = MLP([feature_dim, out_dim])
+        
+        nn.init.constant_(self.layers[-1].bias, 0.0)
+
+    def forward(self, desc0, desc1, mconf):
+        """
+            desc: [b, c, n]
+            mconf: [b, 1, n]
+        """
+        inputs = torch.cat([desc0, desc1], dim=-2)
+        out_f = self.layers_f(inputs)
+        out_c = self.layers_c(mconf)
+        return torch.sigmoid(self.layers(out_f + out_c))
+        # inputs = torch.cat(desc[:-1], dim=-2)
+        # out_f = self.layers_f(inputs)
+        # out_c = self.layers_c(desc[-1])
+        # return torch.sigmoid(self.layers(out_f + out_c))
 
 @dataclass
 class OpacityMappingCfg:
@@ -124,6 +163,7 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
             # if precision == 'fp16':
             #     encoder = self.matcher.half()
 
+        # fpn feature fusion
         self.conv_1x1_1 = nn.Conv2d(256, 256, kernel_size=1)
         self.conv_1x1_2 = nn.Conv2d(256, 128, kernel_size=1)
         self.conv_1x1_3 = nn.Conv2d(128, 64, kernel_size=1)
@@ -131,6 +171,13 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
         self.conv_3x3_1 = nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1)
         self.conv_3x3_2 = nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1)
         self.conv_3x3_3 = nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1)
+
+        # confidence prediction for pose estimation
+        self.use_conf_mlp = True
+        if self.use_conf_mlp:
+            conf_feat_dim = 256
+            conf_dim = 1
+            self.conf_mlp = ConfidenceMLP(conf_feat_dim, conf_dim)
 
         # gaussians convertor
         self.gaussian_adapter = GaussianAdapter(cfg.gaussian_adapter)
@@ -186,6 +233,25 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
         t2 = rearrange(t2, "(b v) c h w -> b v c h w", b=b, v=v)
         t3 = rearrange(t3, "(b v) c h w -> b v c h w", b=b, v=v)
         return [t1, t2, t3]
+
+    def sample_descriptors(self, keypoints, descriptors, s: int = 8):
+        """Interpolate descriptors at keypoint locations"""
+        b, c, h, w = descriptors.shape
+        keypoints = keypoints - s / 2 + 0.5
+        keypoints /= torch.tensor(
+            [(w * s - s / 2 - 0.5), (h * s - s / 2 - 0.5)],
+        ).to(
+            keypoints
+        )[None]
+        keypoints = keypoints * 2 - 1  # normalize to (-1, 1)
+        args = {"align_corners": True} if torch.__version__ >= "1.3" else {}
+        descriptors = torch.nn.functional.grid_sample(
+            descriptors, keypoints.view(b, 1, -1, 2), mode="bilinear", **args
+        )
+        descriptors = torch.nn.functional.normalize(
+            descriptors.reshape(b, c, -1), p=2, dim=1
+        )
+        return descriptors
 
 
     def adaptive_layers(self, trans_features, cnn_features):
@@ -274,12 +340,39 @@ class EncoderELoFTR(Encoder[EncoderELoFTRCfg]):
         #     data["mkpts0_f"], data["mkpts1_f"], data["mconf"], data['m_bids']
 
         # est_pose = True
-        est_pose = False
+        est_pose = True
         if est_pose:
-            # @TODO: Weights decoder for weighted 8-point algorithm
-            
+            #  Weights decoder for weighted 8-point algorithm
+            if self.use_conf_mlp:
+                weights_list = []
+                for i in range(b):
+                    b_mask = batch['mbids'] == i
+                    mkpts0 = batch["mkpts0"][b_mask][None] # [1, n, 2]
+                    mkpts1 = batch["mkpts1"][b_mask][None] # [1, n, 2]
+                    mconf = batch["mconf"][b_mask].view(1, 1, -1) # [1, 1, n]
+
+                    # print ("mconf before:", batch["mconf"][b_mask])
+
+                    feat0 = trans_features[i][0][None] # [1, 256, h/8, w/8]
+                    feat1 = trans_features[i][1][None] # [1, 256, h/8, w/8]
+
+                    # sample descriptors from trans features
+                    desc0 = self.sample_descriptors(mkpts0, feat0) # [1, 256, n]
+                    desc1 = self.sample_descriptors(mkpts1, feat1) # [1, 256, n]
+
+                    # go through conf mlp for decoding the final weights
+                    # weights = self.conf_mlp(desc0, desc1, mconf) # [1, 1, n]
+                    
+                    mconf = self.conf_mlp(desc0, desc1, mconf).squeeze()
+                    # print ("mconf after:", mconf)
+                    weights_list.append(mconf)
+
+                weights = torch.cat(weights_list, dim=0)
+                batch["mconf"] = weights
+
             # Pose estimation from the sparse matched keypoints
-            extrinsics_est = run_weighted_8_point(batch)
+            extrinsics_est, pose_eval_dict = run_weighted_8_point(batch)
+            batch.update(pose_eval_dict)
         
         
         # Sample depths from the resulting features.

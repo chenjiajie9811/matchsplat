@@ -177,6 +177,11 @@ def run_weighted_8_point(batch):
     # So that we can keep the target views also unchanged
     extrinsics_est = batch["context"]["extrinsics"].clone().detach()
     
+    trans_err_abs_list = []
+    rot_err_abs_list = []
+    trans_err_rel_list = []
+    rot_err_rel_list = []
+    
     # Perform pose estimation in each batch
     for i in range(b):
         b_mask = mbids == i
@@ -211,6 +216,12 @@ def run_weighted_8_point(batch):
         extr1_est =  extr0 @ torch.inverse(T_021_est)
         extrinsics_est[i, 1] = extr1_est.squeeze()
 
+        trans_err_abs_list.append(compute_translation_error_as_angle(extr1_est[None], extr1[None], reduce=False))
+        rot_err_abs_list.append(compute_rotation_error(extr1_est[None], extr1[None], reduce=False))
+        trans_err_rel_list.append(compute_translation_error_as_angle(T_021_est[None], T_021_gt[None], reduce=False))
+        rot_err_rel_list.append(compute_rotation_error(T_021_est[None], T_021_gt[None], reduce=False))
+        
+
         # eval
         # print (f"gt extr1:\n {extr1}")
         # print (f"est extr1:\n {extr1_est}")
@@ -222,7 +233,14 @@ def run_weighted_8_point(batch):
         # print (f"rotation err:\n {compute_rotation_error(T_021_est[None], T_021_gt[None], reduce=False)}") 
         # print (f"translation error:\n {compute_translation_error_as_angle(T_021_est[None], T_021_gt[None], reduce=False)}")
 
-    return extrinsics_est
+    pose_eval_dict = {
+        "rot_err_abs" : torch.stack(rot_err_abs_list).mean(),
+        "trans_err_abs" : torch.stack(trans_err_abs_list).mean(),
+        "rot_err_rel" : torch.stack(rot_err_rel_list).mean(),
+        "trans_err_rel" : torch.stack(trans_err_rel_list).mean(),
+    }
+
+    return extrinsics_est, pose_eval_dict
 
         
 

@@ -153,10 +153,10 @@ class ModelWrapper(LightningModule):
 
         # for debug
         # output the gaussians mean
-        for i in range(gaussians.means.shape[0]):
-            gs_i = gaussians.means[i].clone().detach().cpu().numpy()
-            save_points_ply(gs_i, f"outputs/tmp/gaussians_{i}.ply")
-            input()
+        # for i in range(gaussians.means.shape[0]):
+        #     gs_i = gaussians.means[i].clone().detach().cpu().numpy()
+        #     save_points_ply(gs_i, f"outputs/tmp/gaussians_{i}.ply")
+        #     input()
 
         # est_pose = True
         est_pose = False
@@ -193,6 +193,13 @@ class ModelWrapper(LightningModule):
         )
         self.log("train/psnr_probabilistic", psnr_probabilistic.mean())
         self.writer.add_scalar("train/psnr_probabilistic", psnr_probabilistic.mean().item(), self.global_step)
+
+        # Write pose estimation error
+        self.writer.add_scalar("train/rot_err_abs", batch["rot_err_abs"].item(), self.global_step)
+        self.writer.add_scalar("train/trans_err_abs", batch["trans_err_abs"].item(), self.global_step)
+        self.writer.add_scalar("train/rot_err_rel", batch["rot_err_rel"].item(), self.global_step)
+        self.writer.add_scalar("train/trans_err_rel", batch["trans_err_rel"].item(), self.global_step)
+        
 
 
         # Compute and log loss.

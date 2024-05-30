@@ -105,7 +105,7 @@ def get_depth_guided_candi(near, far, far_mk, num_samples, sigma=0.8):
 def prepare_feat_proj_data_lists(
     features, intrinsics, extrinsics, 
     near, far, num_samples, 
-    near_mk, far_mk, depth_guided_sample
+    # near_mk, far_mk, depth_guided_sample
 ):
     # prepare features
     b, v, _, h, w = features.shape
@@ -145,20 +145,20 @@ def prepare_feat_proj_data_lists(
     intr_curr[:, :, 1, :] *= float(h)
     intr_curr = rearrange(intr_curr, "b v ... -> (v b) ...", b=b, v=v)  # [vxb 3 3]
 
-    if depth_guided_sample:
-        mk_depth_candi = get_depth_guided_candi(near, far, far_mk, num_samples)
-        mk_depth_candi = (1.0 / mk_depth_candi).type_as(features) # depth -> disp
-        depth_candi_curr = repeat(mk_depth_candi, "vb d -> vb d () ()")  # [vxb, d, 1, 1]
-    else:
-        # prepare depth bound (inverse depth) [v*b, d]
-        min_depth = rearrange(1.0 / far.clone().detach(), "b v -> (v b) 1")
-        max_depth = rearrange(1.0 / near.clone().detach(), "b v -> (v b) 1")
-        depth_candi_curr = (
-            min_depth
-            + torch.linspace(0.0, 1.0, num_samples).unsqueeze(0).to(min_depth.device)
-            * (max_depth - min_depth)
-        ).type_as(features)
-        depth_candi_curr = repeat(depth_candi_curr, "vb d -> vb d () ()")  # [vxb, d, 1, 1]
+    # if depth_guided_sample:
+    #     mk_depth_candi = get_depth_guided_candi(near, far, far_mk, num_samples)
+    #     mk_depth_candi = (1.0 / mk_depth_candi).type_as(features) # depth -> disp
+    #     depth_candi_curr = repeat(mk_depth_candi, "vb d -> vb d () ()")  # [vxb, d, 1, 1]
+    # else:
+    # prepare depth bound (inverse depth) [v*b, d]
+    min_depth = rearrange(1.0 / far.clone().detach(), "b v -> (v b) 1")
+    max_depth = rearrange(1.0 / near.clone().detach(), "b v -> (v b) 1")
+    depth_candi_curr = (
+        min_depth
+        + torch.linspace(0.0, 1.0, num_samples).unsqueeze(0).to(min_depth.device)
+        * (max_depth - min_depth)
+    ).type_as(features)
+    depth_candi_curr = repeat(depth_candi_curr, "vb d -> vb d () ()")  # [vxb, d, 1, 1]
     return feat_lists, intr_curr, pose_curr_lists, depth_candi_curr
 
 def estimate_depth_from_mkpt(features, intrinsics, extrinsics, batch, 
@@ -556,9 +556,9 @@ class DepthPredictorMultiView(nn.Module):
             cnn_features ([b, v, 256, 32, 32]), ([b, v, 128, 64, 64]), ([b, v, 64, 128, 128])
         """
 
-        depth_mkpt_list, near_mks, far_mks, pc_mkpt_world_list = estimate_depth_from_mkpt(batch["context"]["image"], intrinsics, extrinsics, batch, True)
-        print("--------------- gt near far")
-        print(near, far)
+        # depth_mkpt_list, near_mks, far_mks, pc_mkpt_world_list = estimate_depth_from_mkpt(batch["context"]["image"], intrinsics, extrinsics, batch, False)
+        # print("--------------- gt near far")
+        # print(near, far)
 
         raw_correlation_list = []
         feat01_list = []
@@ -574,7 +574,7 @@ class DepthPredictorMultiView(nn.Module):
                     near,
                     far,
                     num_samples=self.num_depth_candidates,
-                    near_mk=near_mks, far_mk=far_mks, depth_guided_sample=False
+                    # near_mk=near_mks, far_mk=far_mks, depth_guided_sample=False
                 )
             ) # [(b v) d_candi 1, 1]
 
@@ -711,41 +711,39 @@ class DepthPredictorMultiView(nn.Module):
                 srf=1,
             ) # (b, v, 65536, 1, 1)
 
-            # pc_mkpt_world_list
-            
             # in world coordiante
-            def iproj_depth(depth, intr, extr):
-                pc = iproj_full_img_(depth, intr.unsqueeze(0), extr.unsqueeze(0)).squeeze(0)
-                perm = torch.randperm(pc.size(0))
-                idx = perm[:1000]
-                pc = pc[idx]
-                return pc
+            # def iproj_depth(depth, intr, extr):
+            #     pc = iproj_full_img_(depth, intr.unsqueeze(0), extr.unsqueeze(0)).squeeze(0)
+            #     perm = torch.randperm(pc.size(0))
+            #     idx = perm[:1000]
+            #     pc = pc[idx]
+            #     return pc
 
-            h, w = batch["context"]["image"].shape[-2:]
-            for i in range(depths.shape[0]):
-                mkpt_pc = pc_mkpt_world_list[i]
+            # h, w = batch["context"]["image"].shape[-2:]
+            # for i in range(depths.shape[0]):
+            #     mkpt_pc = pc_mkpt_world_list[i]
                 
-                depth_pc0 = iproj_depth(
-                    rearrange(depths[i][0].squeeze(), "(h w) -> h w", h=h, w=w),
-                    batch["context"]["intrinsics"][i][0],
-                    batch["context"]["extrinsics"][i][0])
+            #     depth_pc0 = iproj_depth(
+            #         rearrange(depths[i][0].squeeze(), "(h w) -> h w", h=h, w=w),
+            #         batch["context"]["intrinsics"][i][0],
+            #         batch["context"]["extrinsics"][i][0])
                 
-                depth_pc1 = iproj_depth(
-                    rearrange(depths[i][1].squeeze(), "(h w) -> h w", h=h, w=w),
-                    batch["context"]["intrinsics"][i][1],
-                    batch["context"]["extrinsics"][i][1])
+            #     depth_pc1 = iproj_depth(
+            #         rearrange(depths[i][1].squeeze(), "(h w) -> h w", h=h, w=w),
+            #         batch["context"]["intrinsics"][i][1],
+            #         batch["context"]["extrinsics"][i][1])
                 
-                colors = torch.zeros((mkpt_pc.shape[0] + depth_pc0.shape[0], 3))
-                colors[:mkpt_pc.shape[0], 0] = 255
-                colors[mkpt_pc.shape[0]:, 1] = 255
+            #     colors = torch.zeros((mkpt_pc.shape[0] + depth_pc0.shape[0], 3))
+            #     colors[:mkpt_pc.shape[0], 0] = 255
+            #     colors[mkpt_pc.shape[0]:, 1] = 255
 
-                colors2 = torch.zeros((depth_pc0.shape[0] + depth_pc1.shape[0], 3))
-                colors2[:depth_pc0.shape[0], 0] = 255
-                colors2[depth_pc0.shape[0]:, 1] = 255
+            #     colors2 = torch.zeros((depth_pc0.shape[0] + depth_pc1.shape[0], 3))
+            #     colors2[:depth_pc0.shape[0], 0] = 255
+            #     colors2[depth_pc0.shape[0]:, 1] = 255
 
-                save_color_points_ply(torch.cat([depth_pc0, depth_pc1], dim=0), colors2, f"outputs/tmp/depths{i}.ply")
-                save_color_points_ply(torch.cat([mkpt_pc, depth_pc0], dim=0), colors, f"outputs/tmp/depth_tri0_b{i}.ply")
-                save_color_points_ply(torch.cat([mkpt_pc, depth_pc1], dim=0), colors, f"outputs/tmp/depth_tri1_b{i}.ply")
+            #     save_color_points_ply(torch.cat([depth_pc0, depth_pc1], dim=0), colors2, f"outputs/tmp/depths{i}.ply")
+            #     save_color_points_ply(torch.cat([mkpt_pc, depth_pc0], dim=0), colors, f"outputs/tmp/depth_tri0_b{i}.ply")
+            #     save_color_points_ply(torch.cat([mkpt_pc, depth_pc1], dim=0), colors, f"outputs/tmp/depth_tri1_b{i}.ply")
 
 
 
