@@ -105,11 +105,18 @@ def copo_summary(
         img_shape=(256, 256)):
 
      #(2, 256, 512, 3),  (2, 256, 512, 3)
+    # unnormalized intrinsics
+    intrinsics = batch['context']['intrinsics'].clone()
+    intrinsics[..., 0, :] *= img_shape[1]
+    intrinsics[..., 1, :] *= img_shape[0]
+    
     epipolar_pred, epipolar_gt = inspect(
         batch['context']['image'][:, 1].permute(0, 2, 3, 1), 
-        batch['context']['intrinsics'][:, 1],
+        intrinsics[:, 1],
+        # batch['context']['intrinsics'][:, 1],
         batch['context']['image'][:, 0].permute(0, 2, 3, 1), 
-        batch['context']['intrinsics'][:, 0],
+        # batch['context']['intrinsics'][:, 0],
+        intrinsics[:, 0],
         batch['rel_pose'],
         batch['gt_rel_pose'],
     )
@@ -118,6 +125,8 @@ def copo_summary(
     b, _, h, w = batch['flow'][0].size()
     # batch['flow']  -> list (4) -> each with size (b, 2, 64, 64)
 
+    # flow = batch['flow'][0]
+    # flow2 = batch['flow'][1]
     flow = F.interpolate(batch['flow'][0], 256, mode='bilinear') * (256 / h) #torch.Size([b, 2, 256, 256])
     flow2 = F.interpolate(batch['flow'][1], 256, mode='bilinear') * (256 / h) #torch.Size([b, 2, 256, 256])
     

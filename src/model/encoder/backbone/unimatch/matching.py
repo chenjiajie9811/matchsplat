@@ -1,11 +1,83 @@
 import torch
 import torch.nn.functional as F
-
+from einops import rearrange
 from .geometry import coords_grid, generate_window_grid, normalize_coords
 
+def unnormalise_and_convert_mapping_to_flow(map):
+    # here map is normalised to -1;1
+    # we put it back to 0,W-1, then convert it to flow
+    B, C, H, W = map.size()
+    mapping = torch.zeros_like(map)
+    # mesh grid
+    mapping[:,0,:,:] = (map[:, 0, :, :].float().clone() + 1) * (W - 1) / 2.0 # unormalise
+    mapping[:,1,:,:] = (map[:, 1, :, :].float().clone() + 1) * (H - 1) / 2.0 # unormalise
+
+    xx = torch.arange(0, W).view(1,-1).repeat(H,1)
+    yy = torch.arange(0, H).view(-1,1).repeat(1,W)
+    xx = xx.view(1,1,H,W).repeat(B,1,1,1)
+    yy = yy.view(1,1,H,W).repeat(B,1,1,1)
+    grid = torch.cat((xx,yy),1).float()
+
+    if mapping.is_cuda:
+        grid = grid.cuda()
+    flow = mapping - grid
+    return flow
+
+def softmax_with_temperature(x, beta, d = 1):
+    r'''SFNet: Learning Object-aware Semantic Flow (Lee et al.)'''
+    M, _ = x.max(dim=d, keepdim=True)
+    x = x - M # subtract maximum value for stability
+    exp_x = torch.exp(x/beta)
+    exp_x_sum = exp_x.sum(dim=d, keepdim=True)
+    return exp_x / exp_x_sum
+
+def soft_argmax(corr, beta=0.02):
+    r'''SFNet: Learning Object-aware Semantic Flow (Lee et al.)'''
+
+    b,_,h,w = corr.size()
+   
+    corr = softmax_with_temperature(corr, beta=0.02, d=1) 
+    corr = corr.view(-1,h,w,h,w) # (target hxw) x (source hxw)
+
+    grid_x = corr.sum(dim=1, keepdim=False) # marginalize to x-coord.
+    x_normal = torch.linspace(-1, 1, w).expand(b,w).to(corr.device)
+    x_normal = x_normal.view(b,w,1,1)
+    grid_x = (grid_x*x_normal).sum(dim=1, keepdim=True) # b x 1 x h x w
+    
+    grid_y = corr.sum(dim=2, keepdim=False) # marginalize to y-coord.
+    y_normal = torch.linspace(-1, 1, h).expand(b,h).to(corr.device)
+    y_normal = y_normal.view(b,h,1,1)
+    grid_y = (grid_y*y_normal).sum(dim=1, keepdim=True) # b x 1 x h x w
+    return grid_x, grid_y
+
+
+def interpolate4d(x, shape):
+    B, _, H_s, W_s, _, _ = x.shape
+    x = rearrange(x, 'B C H_s W_s H_t W_t -> B (C H_s W_s) H_t W_t')
+    x = F.interpolate(x, size=shape[-2:], mode='bilinear', align_corners=True)
+    x = rearrange(x, 'B (C H_s W_s) H_t W_t -> B (C H_t W_t) H_s W_s', H_s=H_s, W_s=W_s)
+    x = F.interpolate(x, size=shape[:2], mode='bilinear', align_corners=True)
+    x = rearrange(x, 'B (C H_t W_t) H_s W_s -> B C H_s W_s H_t W_t', H_t=shape[-2], W_t=shape[-1])
+    return x
+
+def interpolate2d_token(x, shape):
+    B, L, C = x.shape
+    x = rearrange(x, 'B (H W) C -> B C H W', H=int(L**0.5))
+    x = F.interpolate(x, size=shape, mode='bilinear', align_corners=True)
+    x = rearrange(x, 'B C H W -> B (H W) C')
+    return x
+
+def correlation(feature0, feature1):
+    b, c, h, w = feature0.shape
+    feature0 = feature0.view(b, c, -1).permute(0, 2, 1)  # [B, H*W, C]
+    feature1 = feature1.view(b, c, -1)  # [B, C, H*W]
+
+    correlation = torch.matmul(feature0, feature1).view(b, h, w, h, w) / (c ** 0.5)  # [B, H, W, H, W]
+    return correlation
 
 def global_correlation_softmax(feature0, feature1,
                                pred_bidir_flow=False,
+                               return_correlation=False
                                ):
     # global correlation
     b, c, h, w = feature0.shape
@@ -33,7 +105,10 @@ def global_correlation_softmax(feature0, feature1,
     # when predicting bidirectional flow, flow is the concatenation of forward flow and backward flow
     flow = correspondence - init_grid
 
-    return flow, prob
+    if return_correlation:
+        return flow, prob, correlation.view(-1, h, w, h, w)
+    else:
+        return flow, prob
 
 
 def local_correlation_softmax(feature0, feature1, local_radius,

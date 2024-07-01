@@ -1,38 +1,33 @@
-import torch
-from torch import Tensor, nn
-import torch.nn.functional as F
-import torchvision.transforms as tf
-from einops.einops import rearrange
-from jaxtyping import Float
-from collections import OrderedDict
-
 from dataclasses import dataclass
 from typing import Literal, Optional, List
 
-# copo
-from .copo.aggregation import UFC
+import torch
+from einops import rearrange
+from jaxtyping import Float
+from torch import Tensor, nn
+from collections import OrderedDict
+
 from .copo.backbone import CrossBlock, SpatialEncoder
 from .copo.utils import r6d2mat, extract_intrinsics, normalize_imagenet, warp, pose_inverse_4x4
 
-# dataset
 from ...dataset.shims.bounds_shim import apply_bounds_shim
 from ...dataset.shims.patch_shim import apply_patch_shim
 from ...dataset.types import BatchedExample, DataShim
 from ...geometry.projection import sample_image_grid
 from ..types import Gaussians
-
-
+from .backbone.backbone_gmflow import (
+    BackboneMultiviewGmCoPo,
+)
+from .common.gaussian_adapter import GaussianAdapter, GaussianAdapterCfg
 from .encoder import Encoder
+from .costvolume.depth_predictor_multiview import DepthPredictorMultiView
+from .visualization.encoder_visualizer_costvolume_cfg import EncoderVisualizerCostVolumeCfg
+
 from ...global_cfg import get_cfg
 
 from .epipolar.epipolar_sampler import EpipolarSampler
 from ..encodings.positional_encoding import PositionalEncoding
 
-from .common.gaussian_adapter import GaussianAdapter, GaussianAdapterCfg
-from .costvolume.get_depth import DepthPredictorMultiView
-
-# from .visualization.encoder_visualizer_costvolume_cfg import EncoderVisualizerCostVolumeCfg
-from .visualization.encoder_visualizer_eloftr_cfg import EncoderVisualizerELoftrCfg
 
 @dataclass
 class OpacityMappingCfg:
@@ -42,24 +37,20 @@ class OpacityMappingCfg:
 
 
 @dataclass
-class EncoderCoPoCfg:
-    name: Literal["copo"]
+class EncoderGmCoPoCfg:
+    name: Literal["gmcopo"]
     d_feature: int
     num_depth_candidates: int
     num_surfaces: int
-    visualizer: EncoderVisualizerELoftrCfg
-
+    visualizer: EncoderVisualizerCostVolumeCfg
     gaussian_adapter: GaussianAdapterCfg
     opacity_mapping: OpacityMappingCfg
     gaussians_per_pixel: int
-
-    copo_weights_path: str | None
+    unimatch_weights_path: str | None
     downscale_factor: int
-    n_view: int
-    n_points: int
-    num_hidden_units_phi: int
-
+    
     shim_patch_size: int
+    multiview_trans_attn_split: int
     costvolume_unet_feat_dim: int
     costvolume_unet_channel_mult: List[int]
     costvolume_unet_attn_res: List[int]
@@ -70,37 +61,56 @@ class EncoderCoPoCfg:
     wo_cost_volume: bool
     wo_backbone_cross_attn: bool
     wo_cost_volume_refine: bool
+    use_epipolar_trans: bool
 
 
-class EncoderCoPo(Encoder[EncoderCoPoCfg]):
-    backbone: UFC
+class EncoderGmCoPo(Encoder[EncoderGmCoPoCfg]):
+    backbone: BackboneMultiviewGmCoPo
     depth_predictor:  DepthPredictorMultiView
     gaussian_adapter: GaussianAdapter
 
-    def __init__(self, cfg: EncoderCoPoCfg, backbone_cfg=None) -> None:
+    def __init__(self, cfg: EncoderGmCoPoCfg, backbone_cfg=None) -> None:
         super().__init__(cfg)
-        # self.config = backbone_cfg
-        self.return_cnn_features = True
 
-        self.backbone = UFC
+        # multi-view Transformer backbone
+        if cfg.use_epipolar_trans:
+            self.epipolar_sampler = EpipolarSampler(
+                num_views=get_cfg().dataset.view_sampler.num_context_views,
+                num_samples=32,
+            )
+            self.depth_encoding = nn.Sequential(
+                (pe := PositionalEncoding(10)),
+                nn.Linear(pe.d_out(1), cfg.d_feature),
+            )
+        self.backbone = BackboneMultiviewGmCoPo(
+            feature_channels=cfg.d_feature,
+            downscale_factor=cfg.downscale_factor,
+            no_cross_attn=cfg.wo_backbone_cross_attn,
+            use_epipolar_trans=cfg.use_epipolar_trans,
+        )
+        
+        ckpt_path = cfg.unimatch_weights_path
+        if get_cfg().mode == 'train':
+            if cfg.unimatch_weights_path is None:
+                print("==> Init multi-view transformer backbone from scratch")
+            else:
+                print("==> Load multi-view transformer backbone checkpoint: %s" % ckpt_path)
+                unimatch_pretrained_model = torch.load(ckpt_path)["model"]
+                updated_state_dict = OrderedDict(
+                    {
+                        k: v
+                        for k, v in unimatch_pretrained_model.items()
+                        if k in self.backbone.state_dict()
+                    }
+                )
+                # NOTE: when wo cross attn, we added ffns into self-attn, but they have no pretrained weight
+                is_strict_loading = not cfg.wo_backbone_cross_attn
+                self.backbone.load_state_dict(updated_state_dict, strict=is_strict_loading)
 
-        ckpt_path = cfg.copo_weights_path
-        # if get_cfg().mode == 'train':
-        #     if cfg.copo_weights_path is None:
-        #         print("==> Init E-loFTR backbone from scratch")
-        #     else:
-        #         print("==> Load E-loFTR backbone checkpoint: %s" % ckpt_path)
-        #         self.matcher.load_state_dict(torch.load(ckpt_path)['state_dict'])
-                # self.matcher = reparameter(self.matcher) # no reparameterization will lead to low performance
-                # if precision == 'fp16':
-                #     encoder = self.matcher.half()
-
-        # ---------------------------------------------------------------
-        # pose estimation
-
-        self.cross_attention = CrossBlock()
+        # pose estimator
+        self.essential_module = CrossBlock()
         self.pose_regressor = nn.Sequential(
-            nn.Linear((16*16+6) *256 * 2, 512 ),
+            nn.Linear((16 * 16 + 6) * 256 * 2, 512),
             nn.ReLU(),
             nn.Linear(512, 256),
             nn.ReLU(),
@@ -123,34 +133,17 @@ class EncoderCoPo(Encoder[EncoderCoPoCfg]):
             nn.ReLU(),
             nn.Linear(32, 3),
         )
-        # ---------------------------------------------------------------
-        # Feature and cost aggregation
-
-        self.feature_cost_aggregation = UFC()
-        self.encoder = SpatialEncoder(use_first_pool=False, num_layers=5)
-        self.latent_dim = 256*3 + 64
-
-        self.conv_map = nn.Conv2d(3, 64, kernel_size=7, stride=1, padding=3)
 
 
-        
-
-        self.conv_1x1 = nn.Conv2d(256, cfg.d_feature, kernel_size=1)
-        
-        # ---------------------------------------------------------------
-
-        
-        
         # gaussians convertor
         self.gaussian_adapter = GaussianAdapter(cfg.gaussian_adapter)
 
-        # TODO BA based depth predictor
+        # cost volume based depth predictor
         self.depth_predictor = DepthPredictorMultiView(
             feature_channels=cfg.d_feature,
             upscale_factor=cfg.downscale_factor,
             num_depth_candidates=cfg.num_depth_candidates,
-            costvolume_unet_feat_dim=cfg.costvolume_unet_feat_dim, # input channels
-
+            costvolume_unet_feat_dim=cfg.costvolume_unet_feat_dim,
             costvolume_unet_channel_mult=tuple(cfg.costvolume_unet_channel_mult),
             costvolume_unet_attn_res=tuple(cfg.costvolume_unet_attn_res),
             gaussian_raw_channels=cfg.num_surfaces * (self.gaussian_adapter.d_in + 2),
@@ -164,74 +157,11 @@ class EncoderCoPo(Encoder[EncoderCoPoCfg]):
             wo_cost_volume_refine=cfg.wo_cost_volume_refine,
         )
 
-
-
-    def get_z(self, context, val=False):
-        """
-        Extract features, estimate pose and find correspondence fields.
-        
-        Args:
-        input (dict): A dictionary containing the input data.
-        Returns:
-        tuple: extracted features, estimated pose, correspondence fields.
-        """
-      
-        rgb = context['image']
-        B, n_ctxt, C, H, W= rgb.shape
-
-        intrinsics = context['intrinsics']
-      
-        # Flatten first two dims (batch and number of context)
-        rgb = torch.flatten(rgb, 0, 1)
-        intrinsics = torch.flatten(intrinsics, 0, 1)
-        intrinsics = intrinsics[:, None, :, :]
-        # rgb = rgb.permute(0, -1, 1, 2) # (b*n_ctxt, ch, H, W)
-        self.H, self.W = H, W
-        
-        rgb = (rgb + 1) / 2.
-        rgb = normalize_imagenet(rgb)
-        rgb = torch.cat([rgb], dim=1)
-      
-        z_cnn = self.encoder.forward(rgb, None, self.cfg.n_view)[:3] # (b*n_ctxt, self.latent_dim, H, W)
-        # z_conv = self.conv_map(rgb[:(B*n_ctxt)])
-        
-        z_ctxts, flow_ctxts, c_ctxts = self.feature_cost_aggregation(z_cnn, self.cfg.n_view) # context 2 to context 1 flow and feature maps
-        
-        # Normalize intrinsics for a 0-1 image
-        intrinsics_norm = context['intrinsics'].clone()
-        # intrinsics_norm[:, :, :2, :] = intrinsics_norm[:, :, :2, :] / self.H
-        extracted_intrinsics = extract_intrinsics(intrinsics_norm)
-        
-        pose_feat_ctxt = self.cross_attention(
-            z_ctxts[-1].flatten(-2,-1).transpose(-1,-2), 
-            corr=c_ctxts, 
-            intrinsics=extracted_intrinsics).reshape([B,-1]) # ctxt 1 and ctxt 2
-        
-        # z_ctxts = z_ctxts + [z_conv]
-       
-        pose_latent_ctxt = self.pose_regressor(pose_feat_ctxt)[:,:128]
-        rot_ctxt = self.rotation_regressor(pose_latent_ctxt) # Bxn_views x 9,
-        tran_ctxt = self.translation_regressor(pose_latent_ctxt) # Bxn_views x 3 
-        R_ctxt = r6d2mat(rot_ctxt)[:, :3, :3] 
-
-        #estimated pose between query and context 2?
-        # Or context 1 and 2?
-        estimated_rel_pose_ctxt = torch.cat(
-            (torch.cat((R_ctxt, tran_ctxt.unsqueeze(-1)), dim=-1),
-            torch.FloatTensor([0,0,0,1]).expand(B,1,-1).to(tran_ctxt.device)), 
-            dim=1) 
-        
-        z_ctxts[-1] = F.relu(self.conv_1x1(z_ctxts[-1]))
-        z_trans = [rearrange(z, "(b v) c h w -> b v c h w", b=B, v=n_ctxt) for z in z_ctxts]
-        z_cnn = [rearrange(z, "(b v) c h w -> b v c h w",  b=B, v=n_ctxt) for z in z_cnn]
-
-        return z_trans, z_cnn, estimated_rel_pose_ctxt, flow_ctxts
-
     def map_pdf_to_opacity(
-            self,
-            pdf: Float[Tensor, " *batch"],
-            global_step: int,
-        ) -> Float[Tensor, " *batch"]:
+        self,
+        pdf: Float[Tensor, " *batch"],
+        global_step: int,
+    ) -> Float[Tensor, " *batch"]:
         # https://www.desmos.com/calculator/opvwti3ba9
 
         # Figure out the exponent.
@@ -242,7 +172,30 @@ class EncoderCoPo(Encoder[EncoderCoPoCfg]):
         # Map the probability density to an opacity.
         return 0.5 * (1 - (1 - pdf) ** exponent + pdf ** (1 / exponent))
 
+    def pose_estimation(self, intrinsics_norm, trans_features, correlation):
+        B = trans_features.shape[0]
+        extracted_intrinsics = extract_intrinsics(intrinsics_norm)
+        pose_feats = self.essential_module(
+            rearrange(trans_features, "B V C H W -> (B V) (H W) C"),
+            corr=correlation, # (B, 1, 64, 64, 64, 64)
+            intrinsics=extracted_intrinsics
+        ).reshape(B, -1)
 
+        pose_latent = self.pose_regressor(pose_feats)[:, :128]
+        rot = self.rotation_regressor(pose_latent)
+        trans = self.translation_regressor(pose_latent)
+        R = r6d2mat(rot)[:, :3, :3]
+
+        estimated_rel_pose = torch.cat(
+            [
+                torch.cat([R, trans.unsqueeze(-1)], dim=-1), 
+                torch.FloatTensor([0, 0, 0, 1]).expand(B, 1, -1).to(R.device)
+            ], dim=1
+        )
+
+        return estimated_rel_pose
+
+    
     def forward(
         self,
         batch: dict,
@@ -250,59 +203,49 @@ class EncoderCoPo(Encoder[EncoderCoPoCfg]):
         deterministic: bool = False,
         visualization_dump: Optional[dict] = None,
         scene_names: Optional[list] = None,
-        # from CoPoNerf
-        z=None, rel_pose=None, val=False, flow=None, debug=False
     ) -> Gaussians:
-        """ 
-        Update:
-            batch (dict): {
-                'flow': (torch.Tensor): 
-                'rel_pose_flip': (torch.Tensor): 
-                'rel_pose' : (torch.Tensor): 
-                'gt_rel_pose' : (torch.Tensor): 
-                'gt_rel_pose_flip' : 
-            }
-        """
         context = batch["context"]
         device = context["image"].device
-        b, v, _, h, w = context["image"].shape      # 224, 320
-        
-        trans_features, cnn_features, estimated_rel_pose, flow_orig = self.get_z(context) 
-        # estimated pose [0] == context 1 to context 2, [1] == context 2 to query?
+        b, v, _, h, w = context["image"].shape
 
-        batch['flow'] = flow_orig
+        # Encode the context images.
+        
+        # print ("Start backbone")
+        
+        backbone_out = self.backbone(
+            context["image"],
+            attn_splits=self.cfg.multiview_trans_attn_split,
+            return_cnn_features=True,
+            # epipolar_kwargs=epipolar_kwargs,
+        )
+
+        # print ("============")
+        # for k in backbone_out.keys():
+        #     print (f"{k} : {backbone_out[k].shape}")
+
+        trans_features, cnn_features = backbone_out["trans_features"], backbone_out["cnn_features"]
+
+        # pose estimation
+        estimated_rel_pose = self.pose_estimation(
+            context['intrinsics'].clone(), 
+            torch.cat([trans_features, backbone_out["trans_features_coarse"]], dim=2), # (B, V, 256, 64, 64)
+            backbone_out["correlation"])
+
+        # update batch for the flow and pose
+        batch['flow'] = (backbone_out['flow'], backbone_out["flow_flip"])
+        # batch['flow_flop'] = backbone_out['flow_flip']
         batch['rel_pose_flip'] = pose_inverse_4x4(estimated_rel_pose)
         batch['rel_pose'] = (estimated_rel_pose)
         batch['gt_rel_pose'] = torch.matmul(torch.inverse(context['extrinsics'][:,0]), context['extrinsics'][:,1])
         batch['gt_rel_pose_flip'] = torch.inverse(torch.matmul(torch.inverse(context['extrinsics'][:,-1]), context['extrinsics'][:,0]))
-       
-        """
-            I guess coponerf internelly assumes the num input views can only be 2
 
-            trans features list(3)
-            torch.Size([b, 2, 256, 16, 16]) torch.Size([b, 2, 256, 32, 32]) torch.Size([b, 2, 256, 64, 64]) and after the conv1x1 to [b, 2, 128, 64, 64]
-
-            cnn features  list(3)
-            torch.Size([b, 2, 512, 16, 16]) torch.Size([b, 2, 256, 32, 32]) torch.Size([b, 2, 128, 64, 64])
-
-            estimated_rel_pose:
-            torch.Size([b, 4, 4])
-
-            flow: tuple(4)
-            flow (2 -> 1), flow_flip (1 -> 2), flow_t_to_s, flow_s_to_t
-            all with size (b, 2 64, 64)
-        """
-        
-
-        
         # Sample depths from the resulting features.
-        in_feats = trans_features[-1]
-
+        # print ("Start depth prediction")
+        in_feats = trans_features
         extra_info = {}
         extra_info['images'] = rearrange(context["image"], "b v c h w -> (v b) c h w")
         extra_info["scene_names"] = scene_names
         gpp = self.cfg.gaussians_per_pixel
-
         depths, densities, raw_gaussians = self.depth_predictor(
             in_feats,
             context["intrinsics"],
@@ -312,10 +255,11 @@ class EncoderCoPo(Encoder[EncoderCoPoCfg]):
             gaussians_per_pixel=gpp,
             deterministic=deterministic,
             extra_info=extra_info,
-            cnn_features=cnn_features[-1],
+            cnn_features=cnn_features,
         )
 
         # Convert the features and depths into Gaussians.
+        # print ("Start gaussian adapter")
         xy_ray, _ = sample_image_grid((h, w), device)
         xy_ray = rearrange(xy_ray, "h w xy -> (h w) () xy")
         gaussians = rearrange(
@@ -373,7 +317,7 @@ class EncoderCoPo(Encoder[EncoderCoPoCfg]):
                 "b v r srf spp -> b (v r srf spp)",
             ),
         )
-    
+
     def get_data_shim(self) -> DataShim:
         def data_shim(batch: BatchedExample) -> BatchedExample:
             batch = apply_patch_shim(
@@ -395,5 +339,3 @@ class EncoderCoPo(Encoder[EncoderCoPoCfg]):
     def sampler(self):
         # hack to make the visualizer work
         return None
-
-
